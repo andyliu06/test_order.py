@@ -6,16 +6,16 @@ logging.basicConfig(filename='api_debug.log', level=logging.ERROR)
 
 def test_api():
     try:
-        # 請填入你的 API Key
+        # 請在這裡填入你自己的 OKX 模擬交易 API 資料
         exchange = ccxt.okx({
-            'apiKey': 'YOUR_API_KEY',
-            'secret': 'YOUR_SECRET',
-            'password': 'YOUR_PASSWORD',
+            'apiKey': 'cea4a4da-a5e1-4124-b589-d0f82f3166ae',
+            'secret': 'D03A44C7ED579AADB7B4FA664DDBB92F',
+            'password': 'Dd_0977030927',
             'options': {'defaultType': 'swap'}
         })
-        exchange.set_sandbox_mode(True) # 如果你是在模擬環境
+        exchange.set_sandbox_mode(True) # 確保開啟模擬交易模式
         
-        # 嘗試市價買入 0.01 張 (用最小單位測試，風險極低)
+        # 嘗試市價買入 0.01 張 ETH 永續合約 (U本位)
         order = exchange.create_market_order('ETH/USDT:USDT', 'buy', 0.01, {
             'posSide': 'long', 'tdMode': 'isolated'
         })
