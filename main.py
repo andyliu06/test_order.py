@@ -45,15 +45,15 @@ def get_okx_adr10(symbol='BTC/USDT:USDT'):
 async def monitor_trade(trade_id, symbol, side, pos_side, entry_price, contracts):
     adr10 = await asyncio.to_thread(get_okx_adr10, symbol)
     
-    # Expanded multiplier to secure enough profit against fees
+    # 💡 精準校準：0.10 = 200 USD 價差 | 0.25 = 500 USD | 0.20 = 400 USD
     if side == 'buy':
-        tp1 = round(entry_price + (adr10 * 0.15), 1)
-        tp2 = round(entry_price + (adr10 * 0.35), 1)
-        current_sl = round(entry_price - (adr10 * 0.35), 1)
+        tp1 = round(entry_price + (adr10 * 0.10), 1)
+        tp2 = round(entry_price + (adr10 * 0.25), 1)
+        current_sl = round(entry_price - (adr10 * 0.20), 1)
     else:
-        tp1 = round(entry_price - (adr10 * 0.15), 1)
-        tp2 = round(entry_price - (adr10 * 0.35), 1)
-        current_sl = round(entry_price + (adr10 * 0.35), 1)
+        tp1 = round(entry_price - (adr10 * 0.10), 1)
+        tp2 = round(entry_price - (adr10 * 0.25), 1)
+        current_sl = round(entry_price + (adr10 * 0.20), 1)
 
     remaining_contracts = contracts
     status = "stage_0"  
