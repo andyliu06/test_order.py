@@ -19,44 +19,31 @@ exchange = ccxt.okx({
 })
 exchange.set_sandbox_mode(True)
 
-# 💡 全域倉位池：用來在邏輯層面將交易所合併的倉位切分成獨立小單
+# 全域倉位池：用來在邏輯層面將交易所合併的倉位切分成獨立小單
 active_trades = {}
 
 @app.get("/ping")
 async def ping():
     return {"status": "alive", "timestamp": int(time.time())}
 
-def get_true_range(ohlcv):
-    ranges = []
-    for i in range(1, len(ohlcv)):
-        prev_close = ohlcv[i-1][4]
-        high = ohlcv[i][2]
-        low = ohlcv[i][3]
-        tr = max(high - low, abs(high - prev_close), abs(low - prev_close))
-        ranges.append(tr)
-    return sum(ranges) / len(ranges) if ranges else 2000.0
-
-def get_okx_adr10(symbol='BTC/USDT:USDT'):
-    try:
-        ohlcv = exchange.fetch_ohlcv(symbol, timeframe='1D', limit=11)
-        if not ohlcv or len(ohlcv) < 11: 
-            return 2000.0
-        return get_true_range(ohlcv)
-    except: 
-        return 2000.0
-
 async def monitor_trade(trade_id, symbol, side, pos_side, entry_price, contracts):
-    adr10 = await asyncio.to_thread(get_okx_adr10, symbol)
+    # 💡 依據 47.6x 槓桿與指定收益率（ROE）精準計算價格變動率
+    # TP1: 15.79% / 47.6 = 0.0033172 (約 0.3317%)
+    # TP2: 39.475% / 47.6 = 0.0082931 (約 0.8293%)
+    # SL: 55.915% / 47.6 = 0.0117468 (約 1.1747%)
     
-    # 💡 精準校準：0.10 = 200 USD 價差 | 0.25 = 500 USD | 0.20 = 400 USD
+    tp1_pct = 0.1579 / 47.6
+    tp2_pct = 0.39475 / 47.6
+    sl_pct = 0.55915 / 47.6
+    
     if side == 'buy':
-        tp1 = round(entry_price + (adr10 * 0.10), 1)
-        tp2 = round(entry_price + (adr10 * 0.25), 1)
-        current_sl = round(entry_price - (adr10 * 0.20), 1)
+        tp1 = round(entry_price * (1 + tp1_pct), 1)
+        tp2 = round(entry_price * (1 + tp2_pct), 1)
+        current_sl = round(entry_price * (1 - sl_pct), 1)
     else:
-        tp1 = round(entry_price - (adr10 * 0.10), 1)
-        tp2 = round(entry_price - (adr10 * 0.25), 1)
-        current_sl = round(entry_price + (adr10 * 0.20), 1)
+        tp1 = round(entry_price * (1 - tp1_pct), 1)
+        tp2 = round(entry_price * (1 - tp2_pct), 1)
+        current_sl = round(entry_price * (1 + sl_pct), 1)
 
     status = "stage_0"  
     
@@ -66,9 +53,9 @@ async def monitor_trade(trade_id, symbol, side, pos_side, entry_price, contracts
         'posSide': pos_side
     }
 
-    print(f"📡 [ID: {trade_id}] Monitor Started | Entry: {entry_price} | SL: {current_sl} | TP1: {tp1}")
+    print(f"📡 [ID: {trade_id}] Monitor Started | Entry: {entry_price} | SL: {current_sl} | TP1: {tp1} | TP2: {tp2}")
 
-    # 💡 檢查全域池內屬於此 trade_id 的剩餘合約量
+    # 檢查全域池內屬於此 trade_id 的剩餘合約量
     while trade_id in active_trades and active_trades[trade_id]["remaining"] > 0:
         try:
             ticker = await asyncio.to_thread(exchange.fetch_ticker, symbol)
@@ -160,13 +147,13 @@ async def process_trade(data: dict):
             }
         )
         
-        # 💡 自動獲取交易所回傳的真實成交均價（最精準）
+        # 自動獲取交易所回傳的真實成交均價（最精準）
         entry_price = order.get('average') or order.get('price')
         if not entry_price:
             ticker = await asyncio.to_thread(exchange.fetch_ticker, symbol)
             entry_price = ticker['last']
 
-        # 💡 開倉成功後，再將此筆交易寫入全域池註冊（依據實際成交均價）
+        # 開倉成功後，再將此筆交易寫入全域池註冊（依據實際成交均價）
         active_trades[trade_id] = {
             "entry_price": entry_price,
             "contracts": contracts,
