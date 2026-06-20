@@ -19,12 +19,15 @@ OKX_API_PASSWORD = "Dd_0977030927"
 # === 置換為你指定的交易幣種 ===
 SYMBOL = os.getenv("OKX_SYMBOL", "BTC/USDT:USDT")
 
-CONTRACTS_PER_TRADE = float(os.getenv("OKX_CONTRACTS_PER_TRADE", "2.0"))
+# 🛠️ 已修改：一單預設下單量改為 0.2 張
+CONTRACTS_PER_TRADE = float(os.getenv("OKX_CONTRACTS_PER_TRADE", "0.2"))
 LEVERAGE = float(os.getenv("OKX_LEVERAGE", "47.6"))
 TP1_CLOSE_RATIO = float(os.getenv("OKX_TP1_CLOSE_RATIO", "0.5"))
 MONITOR_INTERVAL_SECONDS = float(os.getenv("OKX_MONITOR_INTERVAL_SECONDS", "2"))
 SYNC_INTERVAL_SECONDS = float(os.getenv("OKX_SYNC_INTERVAL_SECONDS", "15"))
-POSITION_TOLERANCE = float(os.getenv("OKX_POSITION_TOLERANCE", "0.000001"))
+
+# 🛠️ 已修改：調整小數位張數的同步容忍度，防範浮點數誤差
+POSITION_TOLERANCE = float(os.getenv("OKX_POSITION_TOLERANCE", "0.01"))
 POSITION_SYNC_GRACE_SECONDS = float(os.getenv("OKX_POSITION_SYNC_GRACE_SECONDS", "10"))
 
 # === 置換為你指定的 47.6x 槓桿對應的 ROE 百分比 ===
