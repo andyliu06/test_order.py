@@ -11,52 +11,38 @@ import ccxt
 from fastapi import FastAPI, HTTPException
 
 
-# === 置換為你的 API 密鑰與帳號配置 ===
-OKX_API_KEY = "cea4a4da-a5e1-4124-b589-d0f82f3166ae"
-OKX_API_SECRET = "D03A44C7ED579AADB7B4FA664DDBB92F"
-OKX_API_PASSWORD = "Dd_0977030927"
+OKX_API_KEY = "保留你原本的 OKX_API_KEY"
+OKX_API_SECRET = "保留你原本的 OKX_API_SECRET"
+OKX_API_PASSWORD = "保留你原本的 OKX_API_PASSWORD"
 
-# === 置換為你指定的交易幣種 ===
 SYMBOL = os.getenv("OKX_SYMBOL", "BTC/USDT:USDT")
-
-# 🛠️ 已修改：一單預設下單量改為 0.2 張
 CONTRACTS_PER_TRADE = float(os.getenv("OKX_CONTRACTS_PER_TRADE", "0.2"))
 LEVERAGE = float(os.getenv("OKX_LEVERAGE", "47.6"))
 TP1_CLOSE_RATIO = float(os.getenv("OKX_TP1_CLOSE_RATIO", "0.5"))
 MONITOR_INTERVAL_SECONDS = float(os.getenv("OKX_MONITOR_INTERVAL_SECONDS", "2"))
 SYNC_INTERVAL_SECONDS = float(os.getenv("OKX_SYNC_INTERVAL_SECONDS", "15"))
-
-# 🛠️ 已修改：調整小數位張數的同步容忍度，防範浮點數誤差
 POSITION_TOLERANCE = float(os.getenv("OKX_POSITION_TOLERANCE", "0.01"))
 POSITION_SYNC_GRACE_SECONDS = float(os.getenv("OKX_POSITION_SYNC_GRACE_SECONDS", "10"))
 
-# === 置換為你指定的 47.6x 槓桿對應的 ROE 百分比 ===
-SL_PCT = float(os.getenv("OKX_SL_PCT", str(0.55915 / 47.6)))      # 約 1.1747%
-TP1_PCT = float(os.getenv("OKX_TP1_PCT", str(0.1579 / 47.6)))     # 約 0.3317%
-TP2_PCT = float(os.getenv("OKX_TP2_PCT", str(0.39475 / 47.6)))    # 約 0.8293%
+SL_PCT = float(os.getenv("OKX_SL_PCT", str(0.55915 / 47.6)))
+TP1_PCT = float(os.getenv("OKX_TP1_PCT", str(0.1579 / 47.6)))
+TP2_PCT = float(os.getenv("OKX_TP2_PCT", str(0.39475 / 47.6)))
 
-
-logging.basicConfig(
-    level=os.getenv("LOG_LEVEL", "INFO"),
-    format="%(asctime)s %(levelname)s %(message)s",
-)
+logging.basicConfig(level=os.getenv("LOG_LEVEL", "INFO"), format="%(asctime)s %(levelname)s %(message)s")
 logger = logging.getLogger("okx-virtual-bot")
 
-
-exchange = ccxt.okx(
-    {
-        "apiKey": OKX_API_KEY,
-        "secret": OKX_API_SECRET,
-        "password": OKX_API_PASSWORD,
-        "enableRateLimit": True,
-        "options": {
-            "defaultType": "swap",
-            "createMarketBuyOrderRequiresPrice": False,
-            "brokerId": "CCXT",
-            "defaultMarginMode": "isolated",
-        },
-    }
-)
+exchange = ccxt.okx({
+    "apiKey": OKX_API_KEY,
+    "secret": OKX_API_SECRET,
+    "password": OKX_API_PASSWORD,
+    "enableRateLimit": True,
+    "options": {
+        "defaultType": "swap",
+        "createMarketBuyOrderRequiresPrice": False,
+        "brokerId": "CCXT",
+        "defaultMarginMode": "isolated",
+    },
+})
 
 if os.getenv("OKX_SANDBOX", "true").lower() in {"1", "true", "yes"}:
     exchange.set_sandbox_mode(True)
@@ -124,8 +110,7 @@ def calculate_levels(entry_price: float, side: str) -> tuple[float, float, float
 
 
 def normalize_amount(symbol: str, amount: float) -> float:
-    precise = exchange.amount_to_precision(symbol, max(amount, 0.0))
-    return float(precise)
+    return float(exchange.amount_to_precision(symbol, max(amount, 0.0)))
 
 
 def float_value(value: Any) -> Optional[float]:
@@ -137,9 +122,7 @@ def float_value(value: Any) -> Optional[float]:
 
 def positive_float(value: Any) -> Optional[float]:
     parsed = float_value(value)
-    if parsed is None:
-        return None
-    return parsed if parsed > 0 else None
+    return parsed if parsed and parsed > 0 else None
 
 
 def extract_order_average(order: Dict[str, Any]) -> Optional[float]:
@@ -147,16 +130,17 @@ def extract_order_average(order: Dict[str, Any]) -> Optional[float]:
     if average:
         return average
 
-    filled = positive_float(order.get("filled"))
-    cost = positive_float(order.get("cost"))
-    if filled and cost:
-        return cost / filled
-
     info = order.get("info") or {}
     for key in ("avgPx", "avgPxUsd", "fillPx", "px"):
         average = positive_float(info.get(key))
         if average:
             return average
+
+    filled = positive_float(order.get("filled"))
+    cost = positive_float(order.get("cost"))
+    if filled and cost:
+        return cost / filled
+
     return None
 
 
@@ -170,7 +154,29 @@ def extract_order_filled(order: Dict[str, Any], fallback: Optional[float] = None
         filled = positive_float(info.get(key))
         if filled:
             return filled
+
     return fallback
+
+
+def extract_trades_average_and_filled(trades: list[Dict[str, Any]]) -> Dict[str, Optional[float]]:
+    total_amount = 0.0
+    weighted_price_sum = 0.0
+
+    for trade in trades:
+        info = trade.get("info") or {}
+        amount = positive_float(trade.get("amount")) or positive_float(info.get("fillSz")) or positive_float(info.get("sz"))
+        price = positive_float(trade.get("price")) or positive_float(info.get("fillPx")) or positive_float(info.get("px"))
+
+        if not amount or not price:
+            continue
+
+        total_amount += amount
+        weighted_price_sum += amount * price
+
+    if total_amount <= 0:
+        return {"average": None, "filled": None}
+
+    return {"average": weighted_price_sum / total_amount, "filled": total_amount}
 
 
 async def ccxt_call(method_name: str, *args: Any, **kwargs: Any) -> Any:
@@ -182,13 +188,37 @@ async def load_markets_once() -> None:
     await ccxt_call("load_markets")
 
 
-async def fetch_order_details(
-    order: Dict[str, Any],
-    symbol: str,
-    pos_side: str,
-) -> Dict[str, Optional[float]]:
+async def fetch_order_trade_details(order_id: str, symbol: str) -> Dict[str, Optional[float]]:
+    for attempt in range(5):
+        try:
+            trades = await ccxt_call("fetch_order_trades", order_id, symbol)
+            details = extract_trades_average_and_filled(trades)
+            if details["average"] and details["filled"]:
+                return details
+        except Exception as exc:
+            logger.warning("fetch_order_trades lookup failed attempt=%s: %s", attempt + 1, exc)
+
+        try:
+            trades = await ccxt_call("fetch_my_trades", symbol, None, 100, {"ordId": order_id})
+            filtered_trades = [
+                trade for trade in trades
+                if str(trade.get("order") or (trade.get("info") or {}).get("ordId") or "") == str(order_id)
+            ]
+            details = extract_trades_average_and_filled(filtered_trades)
+            if details["average"] and details["filled"]:
+                return details
+        except Exception as exc:
+            logger.warning("fetch_my_trades lookup failed attempt=%s: %s", attempt + 1, exc)
+
+        await asyncio.sleep(0.5)
+
+    return {"average": None, "filled": None}
+
+
+async def fetch_order_details(order: Dict[str, Any], symbol: str, pos_side: str) -> Dict[str, Optional[float]]:
     average = extract_order_average(order)
     filled = extract_order_filled(order)
+
     if average and filled:
         return {"average": average, "filled": filled}
 
@@ -202,14 +232,42 @@ async def fetch_order_details(
                 if average and filled:
                     return {"average": average, "filled": filled}
             except Exception as exc:
-                logger.warning("fetch_order fill lookup failed attempt=%s: %s", attempt + 1, exc)
+                logger.warning("fetch_order lookup failed attempt=%s: %s", attempt + 1, exc)
+
             await asyncio.sleep(0.5)
 
-    position = await fetch_actual_position(symbol, pos_side)
-    return {
-        "average": average or position["entry_price"] or None,
-        "filled": filled,
-    }
+        trade_details = await fetch_order_trade_details(order_id, symbol)
+        average = average or trade_details["average"]
+        filled = filled or trade_details["filled"]
+
+        if average and filled:
+            return {"average": average, "filled": filled}
+
+    raise RuntimeError(f"entry order has no per-order average/fill; refusing to use position average: {order}")
+
+
+async def fetch_close_order_filled(order: Dict[str, Any], symbol: str) -> Optional[float]:
+    filled = extract_order_filled(order)
+    if filled:
+        return filled
+
+    order_id = order.get("id")
+    if not order_id:
+        return None
+
+    for attempt in range(5):
+        try:
+            fetched_order = await ccxt_call("fetch_order", order_id, symbol)
+            filled = extract_order_filled(fetched_order)
+            if filled:
+                return filled
+        except Exception as exc:
+            logger.warning("fetch close order lookup failed attempt=%s: %s", attempt + 1, exc)
+
+        await asyncio.sleep(0.5)
+
+    trade_details = await fetch_order_trade_details(order_id, symbol)
+    return trade_details["filled"]
 
 
 async def fetch_actual_position(symbol: str, pos_side: str) -> Dict[str, float]:
@@ -230,12 +288,24 @@ async def fetch_actual_position(symbol: str, pos_side: str) -> Dict[str, float]:
 
         return {
             "contracts": contracts,
-            "entry_price": positive_float(position.get("entryPrice"))
-            or positive_float(info.get("avgPx"))
-            or 0.0,
+            "entry_price": positive_float(position.get("entryPrice")) or positive_float(info.get("avgPx")) or 0.0,
         }
 
     return {"contracts": 0.0, "entry_price": 0.0}
+
+
+async def fetch_position_close_delta(symbol: str, pos_side: str, before_contracts: float) -> float:
+    latest_contracts = before_contracts
+
+    for _ in range(8):
+        await asyncio.sleep(0.5)
+        actual = await fetch_actual_position(symbol, pos_side)
+        latest_contracts = actual["contracts"]
+        delta = before_contracts - latest_contracts
+        if delta > POSITION_TOLERANCE:
+            return delta
+
+    return max(before_contracts - latest_contracts, 0.0)
 
 
 async def virtual_sum(symbol: str, pos_side: str) -> float:
@@ -272,39 +342,25 @@ async def sync_side(symbol: str, pos_side: str) -> Dict[str, Any]:
     virtual_contracts = await virtual_sum(symbol, pos_side)
     diff = actual_contracts - virtual_contracts
     is_synced = abs(diff) <= POSITION_TOLERANCE
-    can_close_virtual_trades = actual_contracts + POSITION_TOLERANCE >= virtual_contracts
+    can_close_virtual_trades = actual_contracts > POSITION_TOLERANCE
 
-    if is_synced:
-        return {
-            "actual": actual_contracts,
-            "virtual": virtual_contracts,
-            "diff": diff,
-            "is_synced": is_synced,
-            "can_close_virtual_trades": can_close_virtual_trades,
-        }
-
-    logger.warning(
-        "position mismatch symbol=%s pos_side=%s actual=%s virtual=%s diff=%s",
-        symbol,
-        pos_side,
-        actual_contracts,
-        virtual_contracts,
-        diff,
-    )
-
-    if actual_contracts < virtual_contracts:
-        if await has_recent_trade(symbol, pos_side):
-            logger.warning(
-                "position mismatch is inside new-trade grace window; blocking closes until actual position catches up"
-            )
-        else:
-            logger.warning(
-                "actual position is smaller than virtual trades; virtual trades were not mutated and closes are blocked"
-            )
-    else:
+    if not is_synced:
         logger.warning(
-            "actual position is larger than virtual trades; unmanaged contracts will not be closed by this bot"
+            "position mismatch symbol=%s pos_side=%s actual=%s virtual=%s diff=%s",
+            symbol,
+            pos_side,
+            actual_contracts,
+            virtual_contracts,
+            diff,
         )
+
+        if actual_contracts < virtual_contracts:
+            if await has_recent_trade(symbol, pos_side):
+                logger.warning("position mismatch is inside new-trade grace window; closes are allowed only when actual can cover requested amount")
+            else:
+                logger.warning("actual position is smaller than virtual trades; closes are allowed only when actual can cover requested amount")
+        else:
+            logger.warning("actual position is larger than virtual trades; unmanaged contracts will not be closed by this bot")
 
     return {
         "actual": actual_contracts,
@@ -345,15 +401,6 @@ async def close_virtual_trade(trade_id: str, requested_amount: float, reason: st
 
     async with side_locks[pos_side]:
         sync_result = await sync_side(symbol, pos_side)
-        if not sync_result["can_close_virtual_trades"]:
-            logger.warning(
-                "skip close because position is not synchronized trade_id=%s reason=%s actual=%s virtual=%s",
-                trade_id,
-                reason,
-                sync_result["actual"],
-                sync_result["virtual"],
-            )
-            return 0.0
 
         async with registry_lock:
             trade = active_trades.get(trade_id)
@@ -362,19 +409,38 @@ async def close_virtual_trade(trade_id: str, requested_amount: float, reason: st
             trade_side = trade.side
             trade_remaining = trade.remaining
 
-        actual = await fetch_actual_position(symbol, pos_side)
-        close_amount = min(requested_amount, trade_remaining, actual["contracts"])
-        close_amount = normalize_amount(symbol, close_amount)
+        close_amount = normalize_amount(symbol, min(requested_amount, trade_remaining))
         if close_amount <= POSITION_TOLERANCE:
             logger.warning(
-                "skip close trade_id=%s reason=%s requested=%s trade_remaining=%s actual=%s",
+                "skip close trade_id=%s reason=%s requested=%s trade_remaining=%s",
                 trade_id,
                 reason,
                 requested_amount,
                 trade_remaining,
-                actual["contracts"],
             )
             return 0.0
+
+        actual_before = await fetch_actual_position(symbol, pos_side)
+        if actual_before["contracts"] + POSITION_TOLERANCE < close_amount:
+            logger.warning(
+                "skip close because actual position cannot cover requested close trade_id=%s reason=%s actual=%s close_amount=%s virtual=%s",
+                trade_id,
+                reason,
+                actual_before["contracts"],
+                close_amount,
+                sync_result["virtual"],
+            )
+            return 0.0
+
+        if not sync_result["is_synced"]:
+            logger.warning(
+                "position is not fully synchronized but close is allowed trade_id=%s reason=%s actual=%s virtual=%s close_amount=%s",
+                trade_id,
+                reason,
+                sync_result["actual"],
+                sync_result["virtual"],
+                close_amount,
+            )
 
         order = await ccxt_call(
             "create_order",
@@ -383,14 +449,33 @@ async def close_virtual_trade(trade_id: str, requested_amount: float, reason: st
             opposite_side(trade_side),
             close_amount,
             None,
-            {
-                "tdMode": "isolated",
-                "reduceOnly": True,
-                "posSide": pos_side,
-            },
+            {"tdMode": "isolated", "reduceOnly": True, "posSide": pos_side},
         )
-        filled_from_order = extract_order_filled(order, close_amount) or close_amount
-        filled = normalize_amount(symbol, min(filled_from_order, close_amount))
+
+        filled_from_order = await fetch_close_order_filled(order, symbol)
+        if not filled_from_order:
+            position_delta = await fetch_position_close_delta(symbol, pos_side, actual_before["contracts"])
+            filled_from_order = position_delta if position_delta > POSITION_TOLERANCE else None
+
+        if not filled_from_order:
+            logger.error(
+                "close order submitted but filled amount could not be confirmed trade_id=%s reason=%s order=%s",
+                trade_id,
+                reason,
+                order,
+            )
+            return 0.0
+
+        filled = normalize_amount(symbol, min(filled_from_order, close_amount, trade_remaining))
+        if filled <= POSITION_TOLERANCE:
+            logger.warning(
+                "confirmed close fill is too small trade_id=%s reason=%s filled=%s close_amount=%s",
+                trade_id,
+                reason,
+                filled,
+                close_amount,
+            )
+            return 0.0
 
         async with registry_lock:
             trade = active_trades.get(trade_id)
@@ -502,10 +587,7 @@ async def open_virtual_trade(data: Dict[str, Any]) -> VirtualTrade:
             side,
             contracts,
             None,
-            {
-                "tdMode": "isolated",
-                "posSide": pos_side,
-            },
+            {"tdMode": "isolated", "posSide": pos_side},
         )
 
         order_details = await fetch_order_details(order, symbol, pos_side)
@@ -515,7 +597,7 @@ async def open_virtual_trade(data: Dict[str, Any]) -> VirtualTrade:
 
         entry_price = order_details["average"]
         if not entry_price:
-            raise RuntimeError(f"entry order has no average price and position fallback failed: {order}")
+            raise RuntimeError(f"entry order has no average price: {order}")
 
         tp1, tp2, sl = calculate_levels(entry_price, side)
         trade = VirtualTrade(
@@ -592,12 +674,7 @@ async def tradingview_webhook(data: Dict[str, Any]) -> Dict[str, str]:
 @app.get("/trades")
 async def list_trades() -> Dict[str, Any]:
     async with registry_lock:
-        return {
-            "active_trades": {
-                trade_id: asdict(trade)
-                for trade_id, trade in active_trades.items()
-            }
-        }
+        return {"active_trades": {trade_id: asdict(trade) for trade_id, trade in active_trades.items()}}
 
 
 @app.post("/sync")
