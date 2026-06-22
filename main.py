@@ -21,6 +21,8 @@ LEVERAGE = float(os.getenv("OKX_LEVERAGE", "47.6"))
 TP1_CLOSE_RATIO = float(os.getenv("OKX_TP1_CLOSE_RATIO", "0.5"))
 MONITOR_INTERVAL_SECONDS = float(os.getenv("OKX_MONITOR_INTERVAL_SECONDS", "2"))
 SYNC_INTERVAL_SECONDS = float(os.getenv("OKX_SYNC_INTERVAL_SECONDS", "15"))
+CLOSE_ACTION_PAUSE_SECONDS = float(os.getenv("OKX_CLOSE_ACTION_PAUSE_SECONDS", "0.25"))
+
 POSITION_TOLERANCE = float(os.getenv("OKX_POSITION_TOLERANCE", "0.01"))
 POSITION_SYNC_GRACE_SECONDS = float(os.getenv("OKX_POSITION_SYNC_GRACE_SECONDS", "10"))
 
@@ -179,6 +181,13 @@ def extract_trades_average_and_filled(trades: list[Dict[str, Any]]) -> Dict[str,
     return {"average": weighted_price_sum / total_amount, "filled": total_amount}
 
 
+async def wait_or_stop(stop_event: asyncio.Event, timeout: float) -> None:
+    try:
+        await asyncio.wait_for(stop_event.wait(), timeout=timeout)
+    except asyncio.TimeoutError:
+        pass
+
+
 async def ccxt_call(method_name: str, *args: Any, **kwargs: Any) -> Any:
     method = getattr(exchange, method_name)
     return await asyncio.to_thread(method, *args, **kwargs)
@@ -215,7 +224,7 @@ async def fetch_order_trade_details(order_id: str, symbol: str) -> Dict[str, Opt
     return {"average": None, "filled": None}
 
 
-async def fetch_order_details(order: Dict[str, Any], symbol: str, pos_side: str) -> Dict[str, Optional[float]]:
+async def fetch_order_details(order: Dict[str, Any], symbol: str) -> Dict[str, Optional[float]]:
     average = extract_order_average(order)
     filled = extract_order_filled(order)
 
@@ -382,13 +391,13 @@ async def sync_loop(stop_event: asyncio.Event) -> None:
     while not stop_event.is_set():
         try:
             await sync_all_positions()
+        except ccxt.RateLimitExceeded as exc:
+            logger.warning("position sync rate limited: %s", exc)
+            await wait_or_stop(stop_event, 10)
         except Exception as exc:
             logger.exception("position sync failed: %s", exc)
 
-        try:
-            await asyncio.wait_for(stop_event.wait(), timeout=SYNC_INTERVAL_SECONDS)
-        except asyncio.TimeoutError:
-            pass
+        await wait_or_stop(stop_event, SYNC_INTERVAL_SECONDS)
 
 
 async def close_virtual_trade(trade_id: str, requested_amount: float, reason: str) -> float:
@@ -505,47 +514,60 @@ async def close_virtual_trade(trade_id: str, requested_amount: float, reason: st
         return filled
 
 
-async def monitor_trade(trade_id: str) -> None:
-    logger.info("monitor started trade_id=%s", trade_id)
-    while True:
-        async with registry_lock:
-            trade = active_trades.get(trade_id)
-            if not trade or trade.remaining <= POSITION_TOLERANCE:
-                break
+async def monitor_symbol_loop(symbol: str, stop_event: asyncio.Event) -> None:
+    logger.info("symbol monitor started symbol=%s", symbol)
 
-            symbol = trade.symbol
-            side = trade.side
-            tp1_price = trade.tp1_price
-            tp2_price = trade.tp2_price
-            sl_price = trade.sl_price
-            remaining = trade.remaining
-            status = trade.status
-
+    while not stop_event.is_set():
         try:
             ticker = await ccxt_call("fetch_ticker", symbol)
             last_price = float(ticker["last"])
 
-            is_stop_loss = last_price <= sl_price if side == "buy" else last_price >= sl_price
-            is_tp1 = last_price >= tp1_price if side == "buy" else last_price <= tp1_price
-            is_tp2 = last_price >= tp2_price if side == "buy" else last_price <= tp2_price
+            actions: list[tuple[str, float, str]] = []
+            async with registry_lock:
+                for trade_id, trade in list(active_trades.items()):
+                    if trade.symbol != symbol or trade.remaining <= POSITION_TOLERANCE:
+                        continue
 
-            if is_stop_loss:
-                await close_virtual_trade(trade_id, remaining, "sl")
-                break
+                    side = trade.side
+                    is_stop_loss = last_price <= trade.sl_price if side == "buy" else last_price >= trade.sl_price
+                    is_tp1 = last_price >= trade.tp1_price if side == "buy" else last_price <= trade.tp1_price
+                    is_tp2 = last_price >= trade.tp2_price if side == "buy" else last_price <= trade.tp2_price
 
-            if status == "stage_0" and is_tp1:
-                await close_virtual_trade(trade_id, remaining * TP1_CLOSE_RATIO, "tp1")
-            elif status == "stage_1" and is_tp2:
-                await close_virtual_trade(trade_id, remaining, "tp2")
-                break
+                    if is_stop_loss:
+                        actions.append((trade_id, trade.remaining, "sl"))
+                    elif trade.status == "stage_0" and is_tp1:
+                        actions.append((trade_id, trade.remaining * TP1_CLOSE_RATIO, "tp1"))
+                    elif trade.status == "stage_1" and is_tp2:
+                        actions.append((trade_id, trade.remaining, "tp2"))
 
-            await asyncio.sleep(MONITOR_INTERVAL_SECONDS)
+            if actions:
+                logger.info("symbol monitor triggered symbol=%s last=%s actions=%s", symbol, last_price, len(actions))
+
+            for trade_id, amount, reason in actions:
+                if stop_event.is_set():
+                    break
+
+                try:
+                    await close_virtual_trade(trade_id, amount, reason)
+                except ccxt.RateLimitExceeded as exc:
+                    logger.warning("close action rate limited trade_id=%s reason=%s: %s", trade_id, reason, exc)
+                    await wait_or_stop(stop_event, 10)
+                    break
+                except Exception as exc:
+                    logger.exception("close action failed trade_id=%s reason=%s: %s", trade_id, reason, exc)
+
+                await wait_or_stop(stop_event, CLOSE_ACTION_PAUSE_SECONDS)
+
+            await wait_or_stop(stop_event, MONITOR_INTERVAL_SECONDS)
+
+        except ccxt.RateLimitExceeded as exc:
+            logger.warning("symbol monitor rate limited symbol=%s: %s", symbol, exc)
+            await wait_or_stop(stop_event, 10)
         except Exception as exc:
-            logger.exception("monitor error trade_id=%s: %s", trade_id, exc)
-            await asyncio.sleep(5)
+            logger.exception("symbol monitor error symbol=%s: %s", symbol, exc)
+            await wait_or_stop(stop_event, 5)
 
-    await remove_finished_trade(trade_id)
-    logger.info("monitor stopped trade_id=%s", trade_id)
+    logger.info("symbol monitor stopped symbol=%s", symbol)
 
 
 def track_task(task: asyncio.Task) -> None:
@@ -590,7 +612,7 @@ async def open_virtual_trade(data: Dict[str, Any]) -> VirtualTrade:
             {"tdMode": "isolated", "posSide": pos_side},
         )
 
-        order_details = await fetch_order_details(order, symbol, pos_side)
+        order_details = await fetch_order_details(order, symbol)
         filled_contracts = normalize_amount(symbol, order_details["filled"] or contracts)
         if filled_contracts <= POSITION_TOLERANCE:
             raise RuntimeError(f"entry order did not fill: {order}")
@@ -619,8 +641,6 @@ async def open_virtual_trade(data: Dict[str, Any]) -> VirtualTrade:
 
         await sync_side(symbol, pos_side)
 
-    task = asyncio.create_task(monitor_trade(trade_id))
-    track_task(task)
     logger.info(
         "opened trade_id=%s side=%s pos_side=%s contracts=%s entry=%s tp1=%s tp2=%s sl=%s",
         trade_id,
@@ -646,14 +666,19 @@ async def process_trade(data: Dict[str, Any]) -> None:
 async def lifespan(_: FastAPI):
     await load_markets_once()
     stop_event = asyncio.Event()
+
     sync_task = asyncio.create_task(sync_loop(stop_event))
+    monitor_task = asyncio.create_task(monitor_symbol_loop(SYMBOL, stop_event))
     track_task(sync_task)
+    track_task(monitor_task)
+
     try:
         yield
     finally:
         stop_event.set()
         sync_task.cancel()
-        await asyncio.gather(sync_task, return_exceptions=True)
+        monitor_task.cancel()
+        await asyncio.gather(sync_task, monitor_task, return_exceptions=True)
 
 
 app = FastAPI(lifespan=lifespan)
