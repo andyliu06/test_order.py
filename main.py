@@ -347,6 +347,25 @@ async def remove_finished_trade(trade_id: str) -> None:
             del active_trades[trade_id]
 
 
+async def purge_externally_closed(symbol: str, pos_side: str) -> None:
+    """OKX 實際倉位是 0，但虛擬帳本還有紀錄 → 代表外部已平倉（手動/強平/清算），清除虛擬帳本。"""
+    async with registry_lock:
+        to_remove = [
+            tid for tid, t in active_trades.items()
+            if t.symbol == symbol and t.pos_side == pos_side
+        ]
+        for tid in to_remove:
+            trade = active_trades[tid]
+            trade.remaining = 0.0
+            trade.status = "externally_closed"
+            trade.pending_action = None
+            del active_trades[tid]
+            logger.warning(
+                "purged trade_id=%s reason=externally_closed symbol=%s pos_side=%s",
+                tid, symbol, pos_side,
+            )
+
+
 async def sync_side(symbol: str, pos_side: str) -> Dict[str, Any]:
     actual = await fetch_actual_position(symbol, pos_side)
     actual_contracts = actual["contracts"]
@@ -368,6 +387,16 @@ async def sync_side(symbol: str, pos_side: str) -> Dict[str, Any]:
         if actual_contracts < virtual_contracts:
             if await has_recent_trade(symbol, pos_side):
                 logger.warning("position mismatch is inside new-trade grace window; closes are allowed only when actual can cover requested amount")
+            elif actual_contracts <= POSITION_TOLERANCE:
+                # 實際倉位是 0，且不在新開倉 grace window 內 → 外部已平倉，清除虛擬帳本
+                logger.warning(
+                    "actual position is 0 and no recent trade; assuming externally closed symbol=%s pos_side=%s",
+                    symbol, pos_side,
+                )
+                await purge_externally_closed(symbol, pos_side)
+                virtual_contracts = 0.0
+                diff = 0.0
+                is_synced = True
             else:
                 logger.warning("actual position is smaller than virtual trades; closes are allowed only when actual can cover requested amount")
         else:
