@@ -26,9 +26,10 @@ CLOSE_ACTION_PAUSE_SECONDS = float(os.getenv("OKX_CLOSE_ACTION_PAUSE_SECONDS", "
 POSITION_TOLERANCE = float(os.getenv("OKX_POSITION_TOLERANCE", "0.01"))
 POSITION_SYNC_GRACE_SECONDS = float(os.getenv("OKX_POSITION_SYNC_GRACE_SECONDS", "10"))
 
-SL_PCT = float(os.getenv("OKX_SL_PCT", str(0.55915 / 47.6)))
-TP1_PCT = float(os.getenv("OKX_TP1_PCT", str(0.1579 / 47.6)))
-TP2_PCT = float(os.getenv("OKX_TP2_PCT", str(0.39475 / 47.6)))
+# 修正後的百分比：直接用價格變動比例
+SL_PCT  = float(os.getenv("OKX_SL_PCT",  "0.009383"))  # 跌 0.9383%
+TP1_PCT = float(os.getenv("OKX_TP1_PCT", "0.002737"))  # 漲 0.2737%
+TP2_PCT = float(os.getenv("OKX_TP2_PCT", "0.006647"))  # 漲 0.6647%
 
 logging.basicConfig(level=os.getenv("LOG_LEVEL", "INFO"), format="%(asctime)s %(levelname)s %(message)s")
 logger = logging.getLogger("okx-virtual-bot")
@@ -67,6 +68,7 @@ class VirtualTrade:
     tp2_done: bool = False
     sl_done: bool = False
     opened_order_id: Optional[str] = None
+    pending_action: Optional[str] = None  # 防止重複觸發
     created_at: float = field(default_factory=time.time)
     updated_at: float = field(default_factory=time.time)
 
@@ -427,6 +429,11 @@ async def close_virtual_trade(trade_id: str, requested_amount: float, reason: st
                 requested_amount,
                 trade_remaining,
             )
+            # 清除 pending_action
+            async with registry_lock:
+                trade = active_trades.get(trade_id)
+                if trade:
+                    trade.pending_action = None
             return 0.0
 
         actual_before = await fetch_actual_position(symbol, pos_side)
@@ -439,6 +446,11 @@ async def close_virtual_trade(trade_id: str, requested_amount: float, reason: st
                 close_amount,
                 sync_result["virtual"],
             )
+            # 清除 pending_action
+            async with registry_lock:
+                trade = active_trades.get(trade_id)
+                if trade:
+                    trade.pending_action = None
             return 0.0
 
         if not sync_result["is_synced"]:
@@ -473,6 +485,11 @@ async def close_virtual_trade(trade_id: str, requested_amount: float, reason: st
                 reason,
                 order,
             )
+            # 清除 pending_action
+            async with registry_lock:
+                trade = active_trades.get(trade_id)
+                if trade:
+                    trade.pending_action = None
             return 0.0
 
         filled = normalize_amount(symbol, min(filled_from_order, close_amount, trade_remaining))
@@ -484,6 +501,11 @@ async def close_virtual_trade(trade_id: str, requested_amount: float, reason: st
                 filled,
                 close_amount,
             )
+            # 清除 pending_action
+            async with registry_lock:
+                trade = active_trades.get(trade_id)
+                if trade:
+                    trade.pending_action = None
             return 0.0
 
         async with registry_lock:
@@ -493,6 +515,7 @@ async def close_virtual_trade(trade_id: str, requested_amount: float, reason: st
 
             trade.remaining = normalize_amount(symbol, max(trade.remaining - filled, 0.0))
             trade.updated_at = time.time()
+            trade.pending_action = None  # 清除 pending_action
 
             if reason == "tp1":
                 trade.tp1_done = True
@@ -528,16 +551,23 @@ async def monitor_symbol_loop(symbol: str, stop_event: asyncio.Event) -> None:
                     if trade.symbol != symbol or trade.remaining <= POSITION_TOLERANCE:
                         continue
 
+                    # 已有 pending_action 代表上一輪還在處理中，跳過避免重複觸發
+                    if trade.pending_action:
+                        continue
+
                     side = trade.side
                     is_stop_loss = last_price <= trade.sl_price if side == "buy" else last_price >= trade.sl_price
                     is_tp1 = last_price >= trade.tp1_price if side == "buy" else last_price <= trade.tp1_price
                     is_tp2 = last_price >= trade.tp2_price if side == "buy" else last_price <= trade.tp2_price
 
                     if is_stop_loss:
+                        trade.pending_action = "sl"
                         actions.append((trade_id, trade.remaining, "sl"))
                     elif trade.status == "stage_0" and is_tp1:
+                        trade.pending_action = "tp1"
                         actions.append((trade_id, trade.remaining * TP1_CLOSE_RATIO, "tp1"))
                     elif trade.status == "stage_1" and is_tp2:
+                        trade.pending_action = "tp2"
                         actions.append((trade_id, trade.remaining, "tp2"))
 
             if actions:
@@ -551,10 +581,20 @@ async def monitor_symbol_loop(symbol: str, stop_event: asyncio.Event) -> None:
                     await close_virtual_trade(trade_id, amount, reason)
                 except ccxt.RateLimitExceeded as exc:
                     logger.warning("close action rate limited trade_id=%s reason=%s: %s", trade_id, reason, exc)
+                    # 清除 pending_action 讓下一輪可以重試
+                    async with registry_lock:
+                        trade = active_trades.get(trade_id)
+                        if trade:
+                            trade.pending_action = None
                     await wait_or_stop(stop_event, 10)
                     break
                 except Exception as exc:
                     logger.exception("close action failed trade_id=%s reason=%s: %s", trade_id, reason, exc)
+                    # 清除 pending_action 讓下一輪可以重試
+                    async with registry_lock:
+                        trade = active_trades.get(trade_id)
+                        if trade:
+                            trade.pending_action = None
 
                 await wait_or_stop(stop_event, CLOSE_ACTION_PAUSE_SECONDS)
 
